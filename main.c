@@ -1,5 +1,4 @@
 #include "C_socket_utils.h"
-#include <stdbool.h>
 
 int main()
 {
@@ -16,6 +15,7 @@ int main()
     else
     {
         printf("fail");
+        exit(2);
     }
     
     char *linhaDeInput = NULL;

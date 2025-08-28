@@ -9,6 +9,7 @@
 #include <malloc.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 struct ClientSocket
 {
@@ -22,7 +23,7 @@ struct sockaddr_in* CriarEndereco_IPV4(char *ip, int port);
 
 int CriarSocketTCP_IPV4();
 
-struct ClienteSocket *AnalisarConexao(int serverSFD);
+struct ClientSocket *AnalisarConexao(int serverSFD);
 
 
 #endif //C_SOCKET_UTILS_H_INCLUDED
