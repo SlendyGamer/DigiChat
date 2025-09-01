@@ -56,3 +56,7 @@ dkms.conf
 
 # VSCode
 /.vscode
+
+# Executables
+/client/main
+/server/main
