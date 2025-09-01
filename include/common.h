@@ -1,5 +1,5 @@
-#ifndef C_SOCKET_UTILS_H_INCLUDED
-#define C_SOCKET_UTILS_H_INCLUDED
+#ifndef COMMON_H_INCLUDED
+#define COMMON_H_INCLUDED
 
 #include <stdio.h>
 #include <sys/socket.h>
@@ -23,7 +23,4 @@ struct sockaddr_in* CriarEndereco_IPV4(char *ip, int port);
 
 int CriarSocketTCP_IPV4();
 
-struct ClientSocket *AnalisarConexao(int serverSFD);
-
-
-#endif //C_SOCKET_UTILS_H_INCLUDED
+#endif //COMMON_H_INCLUDED

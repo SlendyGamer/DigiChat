@@ -1,4 +1,10 @@
-#include "C_socket_utils.h"
+#include "common.h"
+
+/*
+    CLIENTE
+    Thread 1: espera por entrada do teclado e envia mensagens ao servidor
+    Thread 2: espera por mensagens do servidor e exibe na tela
+*/
 
 int main()
 {
@@ -27,7 +33,7 @@ int main()
         ssize_t CaracteresTam = getline(&linhaDeInput, &linhaDeInputTam, stdin); //captura caracteres digitados até CR, incluindo ele
         if(CaracteresTam>0)
         {
-            if (strcmp(linhaDeInput, "/exit\n") == 0) //se digitado "/exit" e, em seguida Enter, encerra conexao
+            if (strcmp(linhaDeInput, ":exit\n") == 0) //se digitado "/exit" e, em seguida Enter, encerra conexao
             {
                 break;
             }
@@ -36,6 +42,3 @@ int main()
     }
     close(SFD); //fecha o socket que esta aberto e encerra a conexao com o servidor
 }
-
-
-
