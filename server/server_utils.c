@@ -22,9 +22,9 @@ struct ClientSocket *AnalisarConexao(int serverSFD)
 
 void warn_client(int clientSFD, const char *msg) {
     if (send(clientSFD, msg, strlen(msg), 0) >= 0) {
-        printf("[LOG] Cliente notificado!\n");
+        printf("[LOG] " LOG_MSG_NOTF_SV "\n");
     } else {
-        perror("[ERR] Erro ao notificar cliente");
+        perror("[ERR] " ERR_MSG_NOTF);
         pthread_exit(NULL);
     }
 }

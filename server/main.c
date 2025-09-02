@@ -2,6 +2,8 @@
 #include "server_utils.h"
 #include "message_buffer.h"
 #include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 
 /*
     SERVER
@@ -11,6 +13,7 @@
 
 void* receiver_thread(void* arg);
 void* sender_thread(void* arg);
+void* timer_thread();
 
 MessageBuffer* buf;
 
@@ -19,7 +22,7 @@ int main()
     // cria socket do servidor
     int serverSFD = CriarSocketTCP_IPV4();
     if(serverSFD < 0) {
-        perror("[ERR] Erro ao criar socket para server");
+        perror("[ERR] " ERR_MSG_CREATE_SOCKET);
         exit(1);
     }
 
@@ -31,16 +34,21 @@ int main()
     if(serverAddr) free(serverAddr);
     if (resposta == 0)
     {
-        printf("----- Server iniciado com sucesso -----\n\n");
+        printf("----- " LOG_MSG_SERVER_STARTED " -----\n\n");
     }
     else
     {
-        perror("[ERR] Erro ao associar socket e ipv4\n");
+        perror("[ERR] " ERR_MSG_ADDRESS_ASSOCIATION);
         exit(2);
     }
 
     // inicia buffer de mensagens (fila de mensagens compartilhada na memória)
     buf = buffer_init(0);
+
+    // inicia thread de timer para orquestrar mensagens de data e hora
+    pthread_t tid_timer;
+    int serverSFDArg = serverSFD;
+    pthread_create(&tid_timer, NULL, timer_thread, &serverSFDArg);
 
     // colocar server em modo de escuta por novas conexoes
     listen(serverSFD, 1);
@@ -49,7 +57,7 @@ int main()
     struct ClientSocket *clientS = AnalisarConexao(serverSFD);
     if (clientS->erro < 0)
     {
-        perror("[ERR] Erro ao aceitar conexao");
+        perror("[ERR] " ERR_MSG_ACCEPT_CONN);
         exit(3);
     }
 
@@ -64,6 +72,7 @@ int main()
     // espera as threads terminarem
     pthread_join(tid_recv, NULL);
     pthread_join(tid_send, NULL);
+    pthread_join(tid_timer, NULL);
 
     // libera recursos e finaliza
     close(clientS->conexaoSFD);
@@ -93,8 +102,8 @@ void* receiver_thread(void* arg) {
         for(i = 0; i < 1024; i++) {
             n = recv(*clientSFD, &(msg[i]), 1, 0);
             if(n < 0) {
-                perror("[ERR] Erro ao ler mensagem da entrada");
-                warn_client(*clientSFD, "ERRO: Nao foi possivel processar a mensagem enviada. Por favor, tente de novo");
+                perror("[ERR] " ERR_MSG_READ_IN);
+                warn_client(*clientSFD, "ERRO: " ERR_MSG_PROCESS_MSG_CLT);
             }
             
             if(msg[i] == '\n') {
@@ -111,11 +120,11 @@ void* receiver_thread(void* arg) {
             while(msg[0] != '\n' && socket_has_data_to_read(*clientSFD)) {
                 n = recv(*clientSFD, msg, 1, 0);
                 if(n < 0) {
-                    perror("[ERR] Erro ao ler mensagem da entrada");
+                    perror("[ERR] " ERR_MSG_READ_IN);
                 }
             }
 
-            warn_client(*clientSFD, "ERRO: Sua mensagem deve se limitar a 1023 caracteres!");
+            warn_client(*clientSFD, "ERRO: " ERR_MSG_BUF_OVERFLOW_CLT);
 
             buf_overflow = false;
         // caso contrario nao tenha ocorrido estouro, adiciona a mensagem na fila
@@ -140,10 +149,10 @@ void* sender_thread(void* arg) {
     Message **cursor = (Message **)malloc(sizeof(Message *));
     *cursor = NULL;
 
-    while (1) {
+    while(1) {
         msg = buffer_read_next(buf, cursor);
-        if (send(*clientSFD, msg->content, strlen(msg->content), 0) < 0) {
-            perror("[ERR] Erro ao enviar mensagem ao cliente");
+        if(send(*clientSFD, msg->content, strlen(msg->content), 0) < 0) {
+            perror("[ERR] " ERR_MSG_SEND);
             break;
         }
     }
@@ -152,9 +161,42 @@ void* sender_thread(void* arg) {
     return NULL;
 }
 
+void* timer_thread(void* arg) {
+    int *serverSFD = (int *)arg;
+    time_t currentTime;
+    struct tm *tzTime;
+    char timeMsg[58];
+
+    setenv("TZ", "America/Sao_Paulo", 1);
+    tzset();
+
+    while(1) {
+        currentTime = time(NULL);
+        tzTime = localtime(&currentTime);
+        
+        snprintf(
+            timeMsg,
+            sizeof(timeMsg),
+            "--\nHorario: %02d:%02d:%02d GMT-3 %02d/%02d/%04d\n--\n",
+            tzTime->tm_hour,
+            tzTime->tm_min,
+            tzTime->tm_sec,
+            tzTime->tm_mday,
+            tzTime->tm_mon + 1,
+            tzTime->tm_year + 1900
+        );
+
+        printf("[LOG] Time Message\n%s", timeMsg);
+        buffer_enqueue(buf, *serverSFD, timeMsg);
+
+        sleep(60 - tzTime->tm_sec);
+    }
+}
+
 // TODO: thread que lida com comandos no servidor (shutdown)
-// TODO: thread que lida com timers do servidor (funcao de limpeza fallback e registro de mensagens de horario) -- se escalar, necessario dividir em mais threads
+// TODO: funcao de limpeza fallback -- se escalar, necessario dividir timer thread em mais threads
 // TODO: separar threads em server_threads.c
 // TODO: padronizar contantes de mensagens de erro e centralizar manutencao em common.h (tambem util para transmitir mensagens sem consumir tanta rede)
 // TODO: protecao de encerramento de conexao pelo lado do cliente e estrategia de renovacao
 // TODO: melhorar logs pelo lado do servidor para identificar melhor ocorrencias especificas
+// TODO: revisar fluxos de interrupcao de threads e programa
