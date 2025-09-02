@@ -10,25 +10,31 @@
 int main()
 {
     int serverSFD = CriarSocketTCP_IPV4(); //cria o socket do servidor
+    if(serverSFD < 0) {
+        perror("Erro ao criar socket para server");
+        exit(1);
+    }
 
     struct sockaddr_in *serverAddr = CriarEndereco_IPV4("", 2000); //passa ip vazio para criar o endereco do servidor, que sera tratado como INADDR_ANY(aceita conexoes de qualquer interface, desde que seja na porta 2000)
 
     int resposta= bind(serverSFD, (struct sockaddr*) serverAddr, sizeof(*serverAddr)); //associa socket ao endereco
+    if(serverAddr) free(serverAddr);
+
     if (resposta == 0) //valida se bind ocorreu com sucesso
     {
-        printf("server conectado com sucesso\n");
+        printf("Server iniciado com sucesso\n");
     }
     else
     {
-        printf("err\n");
+        perror("Erro ao associar socket e ipv4\n");
         exit(2);
     }
 
-    listen(serverSFD, 10); //coloca server em modo de escuta, ouvindo por novas conexoes, com um limite de 10
+    listen(serverSFD, 1); //coloca server em modo de escuta, ouvindo por novas conexoes, com um limite de 1
 
     struct ClientSocket *clientS = AnalisarConexao(serverSFD); //analisa novas conexoes e as aceita ou nao
-    
-    if (clientS->erro < 0) //se houver algume erro, cancela a execucao
+
+    if (clientS->erro < 0) //se houver algum erro, cancela a execucao
     {
         perror("accept");
         exit(3);
@@ -37,7 +43,7 @@ int main()
     char buffer[1024];
     while(true)
     {
-        int n = recv(clientS->conexaoSFD, buffer, 1024, 0); //recebe os dados enviados pelo cliente e armazena no buffer, devera ser um para cada cliente talvez?
+        int n = recv(clientS->conexaoSFD, buffer, sizeof(buffer) - 1, 0); //recebe os dados enviados pelo cliente e armazena no buffer, devera ser um para cada cliente talvez?
 
         if (n > 0) //funcao recv retorna >0 se houve bytes lidos ou zero se o cliente fechou a conexao
         {
@@ -51,6 +57,7 @@ int main()
     }
 
     close(clientS->conexaoSFD); //fecha o socket de comunicacao com o cliente
+    if(clientS) free(clientS);
     shutdown(serverSFD, SHUT_RDWR); //fecha o socket do servidor de vez
     
     
