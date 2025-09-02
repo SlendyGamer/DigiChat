@@ -5,4 +5,6 @@
 
 struct ClientSocket *AnalisarConexao(int serverSFD);
 
+void warn_client(int clientSFD, const char *msg);
+
 #endif //SERVER_UTILS_H_INCLUDED

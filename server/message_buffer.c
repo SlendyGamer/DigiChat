@@ -17,7 +17,7 @@ MessageBuffer* buffer_init(int total_readers) {
     buf->total_readers = total_readers;
     pthread_mutex_init(&buf->mutex, NULL);
     pthread_cond_init(&buf->cond, NULL);
-
+    
     return buf;
 }
 
@@ -78,12 +78,12 @@ Message* buffer_read_next(MessageBuffer *buf, Message **cursor) {
     if(!buf || !cursor) return NULL;
 
     pthread_mutex_lock(&(buf->mutex));
-
+    
     // enquanto a fila nao tiver um elemento ou ainda nao existir um proximo para ser lido
     while(*cursor == NULL ? buf->head == NULL : (*cursor)->next == NULL) {
         pthread_cond_wait(&buf->cond, &buf->mutex);
     }
-
+    
     Message *next_msg;
 
     // leitura do primeiro da fila X demais leituras
@@ -92,13 +92,13 @@ Message* buffer_read_next(MessageBuffer *buf, Message **cursor) {
     } else {
         next_msg = (*cursor)->next;
     }
-
+    
     (next_msg->remaining_reads)--;
 
     *cursor = next_msg;
-
+    
     pthread_mutex_unlock(&(buf->mutex));
-
+    
     return next_msg;
 }
 

@@ -23,4 +23,6 @@ struct sockaddr_in* CriarEndereco_IPV4(char *ip, int port);
 
 int CriarSocketTCP_IPV4();
 
+int socket_has_data_to_read(int sockFD);
+
 #endif //COMMON_H_INCLUDED

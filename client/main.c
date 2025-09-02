@@ -42,3 +42,8 @@ int main()
     }
     close(SFD); //fecha o socket que esta aberto e encerra a conexao com o servidor
 }
+
+// TODO: limitar caracteres de acordo com constante comum (em common.h)
+// TODO: nao printar a mensagem no terminal quando escreve, mas apenas quando receber de volta do servidor
+// IMPORTANTE: deve enviar o /n para interpretacao pela thread receptora no servidor
+// IMPORTANTE: comandos devem ser tratados no servidor, mas podemos criar uma logica de sinais entre cliente e servidor. Exemplo: cliente le ':exit' e envia ':1' (dicionario para funcao em common.h)

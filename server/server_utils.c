@@ -1,4 +1,5 @@
 #include "server_utils.h"
+#include <pthread.h>
 
 struct ClientSocket *AnalisarConexao(int serverSFD)
 {
@@ -17,4 +18,13 @@ struct ClientSocket *AnalisarConexao(int serverSFD)
     }
 
     return socket;
+}
+
+void warn_client(int clientSFD, const char *msg) {
+    if (send(clientSFD, msg, strlen(msg), 0) >= 0) {
+        printf("[LOG] Cliente notificado!\n");
+    } else {
+        perror("[ERR] Erro ao notificar cliente");
+        pthread_exit(NULL);
+    }
 }

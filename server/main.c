@@ -1,5 +1,7 @@
 #include "common.h"
 #include "server_utils.h"
+#include "message_buffer.h"
+#include <pthread.h>
 
 /*
     SERVER
@@ -7,59 +9,152 @@
     Thread 2: varre estrutura compartilhada e envia mensagens para exibir aos clientes
 */
 
+void* receiver_thread(void* arg);
+void* sender_thread(void* arg);
+
+MessageBuffer* buf;
+
 int main()
 {
-    int serverSFD = CriarSocketTCP_IPV4(); //cria o socket do servidor
+    // cria socket do servidor
+    int serverSFD = CriarSocketTCP_IPV4();
     if(serverSFD < 0) {
-        perror("Erro ao criar socket para server");
+        perror("[ERR] Erro ao criar socket para server");
         exit(1);
     }
 
-    struct sockaddr_in *serverAddr = CriarEndereco_IPV4("", 2000); //passa ip vazio para criar o endereco do servidor, que sera tratado como INADDR_ANY(aceita conexoes de qualquer interface, desde que seja na porta 2000)
+    // cria endereço do servidor, passando ip vazio para tratar como INNADDR_ANY (aceita conexoes de qualquer interface)
+    struct sockaddr_in *serverAddr = CriarEndereco_IPV4("", 2000);
 
-    int resposta= bind(serverSFD, (struct sockaddr*) serverAddr, sizeof(*serverAddr)); //associa socket ao endereco
+    // associa socket ao endereco e libera struct de endereco ja utilizada
+    int resposta = bind(serverSFD, (struct sockaddr*) serverAddr, sizeof(*serverAddr));
     if(serverAddr) free(serverAddr);
-
-    if (resposta == 0) //valida se bind ocorreu com sucesso
+    if (resposta == 0)
     {
-        printf("Server iniciado com sucesso\n");
+        printf("----- Server iniciado com sucesso -----\n\n");
     }
     else
     {
-        perror("Erro ao associar socket e ipv4\n");
+        perror("[ERR] Erro ao associar socket e ipv4\n");
         exit(2);
     }
 
-    listen(serverSFD, 1); //coloca server em modo de escuta, ouvindo por novas conexoes, com um limite de 1
+    // inicia buffer de mensagens (fila de mensagens compartilhada na memória)
+    buf = buffer_init(0);
 
-    struct ClientSocket *clientS = AnalisarConexao(serverSFD); //analisa novas conexoes e as aceita ou nao
+    // colocar server em modo de escuta por novas conexoes
+    listen(serverSFD, 1);
 
-    if (clientS->erro < 0) //se houver algum erro, cancela a execucao
+    // analisa e aceita (ou recusa) novas conexoes
+    struct ClientSocket *clientS = AnalisarConexao(serverSFD);
+    if (clientS->erro < 0)
     {
-        perror("accept");
+        perror("[ERR] Erro ao aceitar conexao");
         exit(3);
     }
 
-    char buffer[1024];
-    while(true)
-    {
-        int n = recv(clientS->conexaoSFD, buffer, sizeof(buffer) - 1, 0); //recebe os dados enviados pelo cliente e armazena no buffer, devera ser um para cada cliente talvez?
+    // cria objetos para controle de threads (argumento e tids)
+    int clientSFDArg = clientS->conexaoSFD;
+    pthread_t tid_recv, tid_send;
 
-        if (n > 0) //funcao recv retorna >0 se houve bytes lidos ou zero se o cliente fechou a conexao
-        {
-            buffer[n] = '\0';
-            printf("response was: %s\n", buffer);
+    // cria threads
+    pthread_create(&tid_recv, NULL, receiver_thread, &clientSFDArg);
+    pthread_create(&tid_send, NULL, sender_thread, &clientSFDArg);
+
+    // espera as threads terminarem
+    pthread_join(tid_recv, NULL);
+    pthread_join(tid_send, NULL);
+
+    // libera recursos e finaliza
+    close(clientS->conexaoSFD);
+    if(clientS) free(clientS);
+    shutdown(serverSFD, SHUT_RDWR);
+    buf = buffer_destroy(buf);
+
+    return 0;
+}
+
+/*
+    THREAD RECEPTORA
+    recebe mensagens do cliente e as coloca no buffer (fila) para que sejam enviadas pelas threads remetentes
+    interpreta comandos e lida com validacoes de entrada
+    envia mensagem de erro na entrada ao cliente caso ocorra
+*/
+void* receiver_thread(void* arg) {
+    int *clientSFD = (int *)arg;
+    char msg[1024];
+    int i, n;
+    bool buf_overflow = false;
+
+    while (1) {
+        // TODO: espera enquanto nao tem nada na fila de recepcao do kernel
+
+        // lê os caracteres que estao na fila de recepcao do kernel ate encontrar '\n' ou estourar o limite do buffer (msg)
+        for(i = 0; i < 1024; i++) {
+            n = recv(*clientSFD, &(msg[i]), 1, 0);
+            if(n < 0) {
+                perror("[ERR] Erro ao ler mensagem da entrada");
+                warn_client(*clientSFD, "ERRO: Nao foi possivel processar a mensagem enviada. Por favor, tente de novo");
+            }
+            
+            if(msg[i] == '\n') {
+                msg[i] = '\0';
+                break;
+            } else if (i == 1023) {
+                buf_overflow = true;
+                break;
+            }
         }
-        else if(n <=0 ) //<0 apenas para casos de erros tambem estarem inclusos
-        {
+
+        // caso tenha estourado o buffer, limpa o restante na fila de recepcao ate o proximo '\n' e envia mensagem de erro ao cliente
+        if(buf_overflow) {
+            while(msg[0] != '\n' && socket_has_data_to_read(*clientSFD)) {
+                n = recv(*clientSFD, msg, 1, 0);
+                if(n < 0) {
+                    perror("[ERR] Erro ao ler mensagem da entrada");
+                }
+            }
+
+            warn_client(*clientSFD, "ERRO: Sua mensagem deve se limitar a 1023 caracteres!");
+
+            buf_overflow = false;
+        // caso contrario nao tenha ocorrido estouro, adiciona a mensagem na fila
+        } else {
+            buffer_enqueue(buf, *clientSFD, msg);
+            printf("[LOG] [CLIENTE] %s\n", msg);
+        }
+    }
+
+    return NULL;
+}
+
+/*
+    THREAD REMETENTE
+    de acordo com o exposto no buffer (fila) de mensagens, envia mensagens ao cliente
+    customiza o formato de envio de acordo com o os sockets fonte e destino
+    acompanha a fila de mensagens com seu proprio cursor
+*/
+void* sender_thread(void* arg) {
+    int *clientSFD = (int *)arg;
+    Message *msg;
+    Message **cursor = (Message **)malloc(sizeof(Message *));
+    *cursor = NULL;
+
+    while (1) {
+        msg = buffer_read_next(buf, cursor);
+        if (send(*clientSFD, msg->content, strlen(msg->content), 0) < 0) {
+            perror("[ERR] Erro ao enviar mensagem ao cliente");
             break;
         }
     }
 
-    close(clientS->conexaoSFD); //fecha o socket de comunicacao com o cliente
-    if(clientS) free(clientS);
-    shutdown(serverSFD, SHUT_RDWR); //fecha o socket do servidor de vez
-    
-    
-    return 0;
+    free(cursor);
+    return NULL;
 }
+
+// TODO: thread que lida com comandos no servidor (shutdown)
+// TODO: thread que lida com timers do servidor (funcao de limpeza fallback e registro de mensagens de horario) -- se escalar, necessario dividir em mais threads
+// TODO: separar threads em server_threads.c
+// TODO: padronizar contantes de mensagens de erro e centralizar manutencao em common.h (tambem util para transmitir mensagens sem consumir tanta rede)
+// TODO: protecao de encerramento de conexao pelo lado do cliente e estrategia de renovacao
+// TODO: melhorar logs pelo lado do servidor para identificar melhor ocorrencias especificas
