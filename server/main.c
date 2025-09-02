@@ -1,4 +1,11 @@
-#include "C_socket_utils.h"
+#include "common.h"
+#include "server_utils.h"
+
+/*
+    SERVER
+    Thread 1: espera por entrada da rede e armazena em estrutura compartilhada, além de criar thread secundária
+    Thread 2: varre estrutura compartilhada e envia mensagens para exibir aos clientes
+*/
 
 int main()
 {
