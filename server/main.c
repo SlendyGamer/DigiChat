@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
 
 /*
     SERVER
@@ -11,11 +12,12 @@
     Thread 2: varre estrutura compartilhada e envia mensagens para exibir aos clientes
 */
 
-void* receiver_thread(void* arg);
+void* receiver_thread();
 void* sender_thread(void* arg);
-void* timer_thread();
+void* timer_thread(void* arg);
 
-MessageBuffer* buf;
+extern MessageBuffer* buf;
+extern ClientInfo* client;
 
 int main()
 {
@@ -29,9 +31,8 @@ int main()
     // cria endereço do servidor, passando ip vazio para tratar como INNADDR_ANY (aceita conexoes de qualquer interface)
     struct sockaddr_in *serverAddr = CriarEndereco_IPV4("", 2000);
 
-    // associa socket ao endereco e libera struct de endereco ja utilizada
+    // associa socket ao endereco
     int resposta = bind(serverSFD, (struct sockaddr*) serverAddr, sizeof(*serverAddr));
-    if(serverAddr) free(serverAddr);
     if (resposta == 0)
     {
         printf("----- " LOG_MSG_SERVER_STARTED " -----\n\n");
@@ -41,44 +42,59 @@ int main()
         perror("[ERR] " ERR_MSG_ADDRESS_ASSOCIATION);
         exit(2);
     }
+    // libera struct de endereço ja utilizada
+    if(serverAddr) free(serverAddr);
 
     // inicia buffer de mensagens (fila de mensagens compartilhada na memória)
     buf = buffer_init(0);
 
-    // inicia thread de timer para orquestrar mensagens de data e hora
-    pthread_t tid_timer;
-    int serverSFDArg = serverSFD;
-    pthread_create(&tid_timer, NULL, timer_thread, &serverSFDArg);
+    // inicia a struct de dados do cliente
+    client = (ClientInfo *)malloc(sizeof(ClientInfo));
+    client->exit_flag = (int *)malloc(sizeof(int));
+    *(client->exit_flag) = 0;
+    pthread_mutex_init(&client->mutex, NULL);
 
     // colocar server em modo de escuta por novas conexoes
     listen(serverSFD, 1);
 
     // analisa e aceita (ou recusa) novas conexoes
-    struct ClientSocket *clientS = AnalisarConexao(serverSFD);
-    if (clientS->erro < 0)
+    struct sockaddr_in clientAddr;
+    socklen_t clientAddrSize = sizeof(clientAddr);
+    client->clientSFD = accept(serverSFD, (struct sockaddr*)&clientAddr, &clientAddrSize);
+
+    if (client->clientSFD < 0)
     {
         perror("[ERR] " ERR_MSG_ACCEPT_CONN);
         exit(3);
     }
 
-    // cria objetos para controle de threads (argumento e tids)
-    int clientSFDArg = clientS->conexaoSFD;
-    pthread_t tid_recv, tid_send;
+    buffer_update_readers(buf, 1);
+    printf("[LOG]" LOG_MSG_NEW_CONN_SV "\n");
+
+    // inicia thread de timer para orquestrar mensagens de data e hora
+    pthread_t tid_timer;
+    pthread_create(&tid_timer, NULL, timer_thread, &serverSFD);
 
     // cria threads
-    pthread_create(&tid_recv, NULL, receiver_thread, &clientSFDArg);
-    pthread_create(&tid_send, NULL, sender_thread, &clientSFDArg);
+    pthread_create(&client->receiver_thread, NULL, receiver_thread, NULL);
+    pthread_create(&client->sender_thread, NULL, sender_thread, &serverSFD);
 
-    // espera as threads terminarem
-    pthread_join(tid_recv, NULL);
-    pthread_join(tid_send, NULL);
-    pthread_join(tid_timer, NULL);
+    // espera as threads
+    pthread_detach(tid_timer);
+    pthread_join(client->receiver_thread, NULL);
+    pthread_join(client->sender_thread, NULL);
 
     // libera recursos e finaliza
-    close(clientS->conexaoSFD);
-    if(clientS) free(clientS);
+    close(client->clientSFD);
     shutdown(serverSFD, SHUT_RDWR);
+    pthread_mutex_destroy(&client->mutex);
+    if(client) {
+        if(client->exit_flag) free(client->exit_flag);
+        free(client);
+    }
     buf = buffer_destroy(buf);
+
+    printf("\n\n");
 
     return 0;
 }
@@ -89,21 +105,37 @@ int main()
     interpreta comandos e lida com validacoes de entrada
     envia mensagem de erro na entrada ao cliente caso ocorra
 */
-void* receiver_thread(void* arg) {
-    int *clientSFD = (int *)arg;
+void* receiver_thread() {
     char msg[1024];
     int i, n;
     bool buf_overflow = false;
+    time_t currentTime;
+    struct tm *tzTime;
+    char timeStr[12];
 
     while (1) {
         // TODO: espera enquanto nao tem nada na fila de recepcao do kernel
 
+        // se a flag foi ativada, encerra a thread
+        if(*client->exit_flag) pthread_exit(NULL);
         // lê os caracteres que estao na fila de recepcao do kernel ate encontrar '\n' ou estourar o limite do buffer (msg)
         for(i = 0; i < 1024; i++) {
-            n = recv(*clientSFD, &(msg[i]), 1, 0);
+            n = recv(client->clientSFD, &(msg[i]), 1, 0);
             if(n < 0) {
-                perror("[ERR] " ERR_MSG_READ_IN);
-                warn_client(*clientSFD, "ERRO: " ERR_MSG_PROCESS_MSG_CLT);
+                if(errno == ECONNRESET) {
+                    printf("[LOG] " LOG_MSG_FORCE_QUIT_SV "\n");
+                } else {
+                    perror("[ERR] " ERR_MSG_READ_IN);
+                    warn_client(client->clientSFD, "ERRO: " ERR_MSG_PROCESS_MSG_CLT);
+                }
+
+                *client->exit_flag = 1;
+                pthread_exit(NULL);
+            } else if(n == 0) {
+                printf("[LOG] " LOG_MSG_DC_SV "\n");
+                
+                *client->exit_flag = 1;
+                pthread_exit(NULL);
             }
             
             if(msg[i] == '\n') {
@@ -117,24 +149,51 @@ void* receiver_thread(void* arg) {
 
         // caso tenha estourado o buffer, limpa o restante na fila de recepcao ate o proximo '\n' e envia mensagem de erro ao cliente
         if(buf_overflow) {
-            while(msg[0] != '\n' && socket_has_data_to_read(*clientSFD)) {
-                n = recv(*clientSFD, msg, 1, 0);
+            while(msg[0] != '\n' && socket_has_data_to_read(client->clientSFD)) {
+                n = recv(client->clientSFD, msg, 1, 0);
                 if(n < 0) {
-                    perror("[ERR] " ERR_MSG_READ_IN);
+                    if(errno == ECONNRESET) {
+                        printf("[LOG] " LOG_MSG_DC_SV "\n");
+                    } else {
+                        perror("[ERR] " ERR_MSG_READ_IN);
+                    }
+
+                    break;
+                } else if(n == 0) {
+                    printf("[LOG] " LOG_MSG_DC_SV "\n");
+
+                    break;
                 }
             }
 
-            warn_client(*clientSFD, "ERRO: " ERR_MSG_BUF_OVERFLOW_CLT);
+            warn_client(client->clientSFD, "ERRO: " ERR_MSG_BUF_OVERFLOW_CLT);
 
             buf_overflow = false;
         // caso contrario nao tenha ocorrido estouro, adiciona a mensagem na fila
         } else {
-            buffer_enqueue(buf, *clientSFD, msg);
-            printf("[LOG] [CLIENTE] %s\n", msg);
+            // TODO: interpretar comandos e adicionar nome e horario
+            if(msg[0] == ':') {
+                parse_command(&msg[1]);
+            } else {
+                currentTime = time(NULL);
+                tzTime = localtime(&currentTime);
+                
+                snprintf(
+                    timeStr,
+                    sizeof(timeStr),
+                    "%02d:%02d:%02d",
+                    tzTime->tm_hour,
+                    tzTime->tm_min,
+                    tzTime->tm_sec
+                );
+                buffer_enqueue(buf, client->clientSFD, client->name, timeStr, msg);
+                printf("[LOG] [CLIENTE] %s\n", msg);
+            }
         }
     }
 
-    return NULL;
+    *client->exit_flag = 1;   
+    pthread_exit(NULL);
 }
 
 /*
@@ -144,21 +203,43 @@ void* receiver_thread(void* arg) {
     acompanha a fila de mensagens com seu proprio cursor
 */
 void* sender_thread(void* arg) {
-    int *clientSFD = (int *)arg;
+    int *serverSFD = (int *)arg;
+    char formatted_msg[MAX_CLIENT_NAME + MAX_MSG_LEN + 13];
     Message *msg;
     Message **cursor = (Message **)malloc(sizeof(Message *));
-    *cursor = NULL;
+    *cursor = buffer_get_tail(buf);
 
+    // TODO: formata a mensagem para enviar
     while(1) {
+        if(*client->exit_flag) pthread_exit(NULL);
         msg = buffer_read_next(buf, cursor);
-        if(send(*clientSFD, msg->content, strlen(msg->content), 0) < 0) {
+        if(msg->senderSFD != *serverSFD) {
+            snprintf(
+                formatted_msg,
+                sizeof(formatted_msg),
+                "%s (%s): %s",
+                msg->sender_name,
+                msg->time,
+                msg->content
+            );
+        } else {
+            snprintf(
+                formatted_msg,
+                sizeof(formatted_msg),
+                "--\n %s \n--",
+                msg->content
+            );
+        }
+
+        if(send(client->clientSFD, formatted_msg, strlen(formatted_msg), 0) < 0) {
             perror("[ERR] " ERR_MSG_SEND);
             break;
         }
     }
 
     free(cursor);
-    return NULL;
+    *client->exit_flag = 1;
+    pthread_exit(NULL);
 }
 
 void* timer_thread(void* arg) {
@@ -177,7 +258,7 @@ void* timer_thread(void* arg) {
         snprintf(
             timeMsg,
             sizeof(timeMsg),
-            "--\nHorario: %02d:%02d:%02d GMT-3 %02d/%02d/%04d\n--\n",
+            "Horario: %02d:%02d:%02d GMT-3 %02d/%02d/%04d",
             tzTime->tm_hour,
             tzTime->tm_min,
             tzTime->tm_sec,
@@ -186,17 +267,19 @@ void* timer_thread(void* arg) {
             tzTime->tm_year + 1900
         );
 
-        printf("[LOG] Time Message\n%s", timeMsg);
-        buffer_enqueue(buf, *serverSFD, timeMsg);
+        printf("[LOG] Time Message - %s\n", timeMsg);
+        buffer_enqueue(buf, *serverSFD, "", "", timeMsg);
 
-        sleep(60 - tzTime->tm_sec);
+        if(tzTime->tm_sec < 60) sleep(60 - tzTime->tm_sec);
     }
 }
 
 // TODO: thread que lida com comandos no servidor (shutdown)
 // TODO: funcao de limpeza fallback -- se escalar, necessario dividir timer thread em mais threads
-// TODO: separar threads em server_threads.c
-// TODO: padronizar contantes de mensagens de erro e centralizar manutencao em common.h (tambem util para transmitir mensagens sem consumir tanta rede)
-// TODO: protecao de encerramento de conexao pelo lado do cliente e estrategia de renovacao
+//*****// TODO: separar threads em server_threads.c
+//*****// TODO: padronizar contantes de mensagens de erro e centralizar manutencao em common.h (tambem util para transmitir mensagens sem consumir tanta rede)
+//*****// TODO: protecao de encerramento de conexao pelo lado do cliente e estrategia de renovacao
 // TODO: melhorar logs pelo lado do servidor para identificar melhor ocorrencias especificas
-// TODO: revisar fluxos de interrupcao de threads e programa
+//*****// TODO: revisar fluxos de interrupcao de threads e programa
+// TODO: modularizar encerramento do servidor e encerramento de socket de cliente para lidar com erros especificos
+// TODO: modularizar leitura de 1 char

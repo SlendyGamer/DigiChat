@@ -19,17 +19,15 @@
 #define ERR_MSG_BUF_OVERFLOW_CLT "Sua mensagem deve se limitar a 1023 caracteres!"
 #define ERR_MSG_SEND "Erro ao enviar mensagem"
 #define ERR_MSG_NOTF "Erro ao enviar notificacao"
+#define ERR_MSG_UNK_COMM "Comando desconhecido!"
 
 #define LOG_MSG_SERVER_STARTED "Servidor iniciado com sucesso"
 #define LOG_MSG_NOTF_SV "Cliente notificado!"
+#define LOG_MSG_FORCE_QUIT_SV "Cliente desconectou forcosamente ou caiu!"
+#define LOG_MSG_DC_SV "Cliente se desconectou!"
+#define LOG_MSG_NEW_CONN_SV "Cliente se conectou!"
 
-struct ClientSocket
-{
-    int conexaoSFD;
-    struct sockaddr_in conexaoAddr;
-    int erro;
-    bool respostaServer;
-};
+#define MSG_DC_SUCCESS "Voce foi desconectado com sucesso!"
 
 struct sockaddr_in* CriarEndereco_IPV4(char *ip, int port);
 

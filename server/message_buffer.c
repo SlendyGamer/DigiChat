@@ -3,92 +3,96 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-void buffer_clean(MessageBuffer *buf);
+void buffer_clean(MessageBuffer *buffer);
+
+MessageBuffer* buf;
 
 /*
     Cria um buffer (fila) de mensagens e inicia mutex e cond
 */
 MessageBuffer* buffer_init(int total_readers) {
-    MessageBuffer *buf = (MessageBuffer *)malloc(sizeof(MessageBuffer));
-    if(!buf) return NULL;
+    MessageBuffer *buffer = (MessageBuffer *)malloc(sizeof(MessageBuffer));
+    if(!buffer) return NULL;
 
-    buf->head = NULL;
-    buf->tail = NULL;
-    buf->total_readers = total_readers;
-    pthread_mutex_init(&buf->mutex, NULL);
-    pthread_cond_init(&buf->cond, NULL);
+    buffer->head = NULL;
+    buffer->tail = NULL;
+    buffer->total_readers = total_readers;
+    pthread_mutex_init(&buffer->mutex, NULL);
+    pthread_cond_init(&buffer->cond, NULL);
     
-    return buf;
+    return buffer;
 }
 
 /*
     Destroi o buffer desalocando cada elemento junto da estrutura principal e retorna nulo para a referencia de quem chama
 */
-MessageBuffer* buffer_destroy(MessageBuffer *buf) {
-    if (!buf) return NULL;
+MessageBuffer* buffer_destroy(MessageBuffer *buffer) {
+    if (!buffer) return NULL;
 
-    Message *aux = buf->head;
+    Message *aux = buffer->head;
     while(aux) {
         Message *tmp = aux->next;
         free(aux);
         aux = tmp;
     }
 
-    pthread_mutex_destroy(&buf->mutex);
-    pthread_cond_destroy(&buf->cond);
+    pthread_mutex_destroy(&buffer->mutex);
+    pthread_cond_destroy(&buffer->cond);
 
-    free(buf);
+    free(buffer);
     return NULL;
 }
 
 /*
     Inicializa novo nó (mensagem), coloca na fila respeitando o mutex, desaloca alguma se necessario e envia um "aviso" (cond) para as threads de leitura
 */
-void buffer_enqueue(MessageBuffer *buf, int senderSFD, const char *msg) {
-    if(!buf || !msg) return;
+void buffer_enqueue(MessageBuffer *buffer, int senderSFD, const char *sender_name, const char *time, const char *msg) {
+    if(!buffer || !msg) return;
 
     Message *new_msg = (Message *)malloc(sizeof(Message));
     if(!new_msg) return;
 
     new_msg->senderSFD = senderSFD;
-    strncpy(new_msg->content, msg, MAX_MSG_LEN);
+    strncpy(new_msg->sender_name, sender_name, MAX_CLIENT_NAME - 1);
+    strncpy(new_msg->content, msg, MAX_MSG_LEN - 1);
+    strncpy(new_msg->time, time, 9);
     new_msg->content[MAX_MSG_LEN - 1] = '\0';
-    new_msg->remaining_reads = buf->total_readers;
+    new_msg->remaining_reads = buffer->total_readers;
     new_msg->next = NULL;
 
-    pthread_mutex_lock(&(buf->mutex));
+    pthread_mutex_lock(&(buffer->mutex));
 
-    if(buf->tail) {
-        buf->tail->next = new_msg;
-        buf->tail = new_msg;
+    if(buffer->tail) {
+        buffer->tail->next = new_msg;
+        buffer->tail = new_msg;
     } else {
-        buf->head = buf->tail = new_msg;
+        buffer->head = buffer->tail = new_msg;
     }
 
-    buffer_clean(buf);
+    buffer_clean(buffer);
 
-    pthread_cond_broadcast(&(buf->cond));
-    pthread_mutex_unlock(&(buf->mutex));
+    pthread_cond_broadcast(&(buffer->cond));
+    pthread_mutex_unlock(&(buffer->mutex));
 }
 
 /*
-    Le o proximo (em relacao ao no do endereco passado) e atualiza o cursor, respeitando o mutex e 
+    Le o proximo (em relacao ao no do endereco passado) e atualiza o cursor, respeitando o mutex e o estado da fila
 */
-Message* buffer_read_next(MessageBuffer *buf, Message **cursor) {
-    if(!buf || !cursor) return NULL;
+Message* buffer_read_next(MessageBuffer *buffer, Message **cursor) {
+    if(!buffer || !cursor) return NULL;
 
-    pthread_mutex_lock(&(buf->mutex));
+    pthread_mutex_lock(&(buffer->mutex));
     
     // enquanto a fila nao tiver um elemento ou ainda nao existir um proximo para ser lido
-    while(*cursor == NULL ? buf->head == NULL : (*cursor)->next == NULL) {
-        pthread_cond_wait(&buf->cond, &buf->mutex);
+    while(*cursor == NULL ? buffer->head == NULL : (*cursor)->next == NULL) {
+        pthread_cond_wait(&buffer->cond, &buffer->mutex);
     }
     
     Message *next_msg;
 
     // leitura do primeiro da fila X demais leituras
     if(*cursor == NULL) {
-        next_msg = buf->head;
+        next_msg = buffer->head;
     } else {
         next_msg = (*cursor)->next;
     }
@@ -97,7 +101,7 @@ Message* buffer_read_next(MessageBuffer *buf, Message **cursor) {
 
     *cursor = next_msg;
     
-    pthread_mutex_unlock(&(buf->mutex));
+    pthread_mutex_unlock(&(buffer->mutex));
     
     return next_msg;
 }
@@ -108,14 +112,38 @@ Message* buffer_read_next(MessageBuffer *buf, Message **cursor) {
     Funcao privada (nao disponivel no header)
     Nao manipula mutex, deve ser usada como acao dentro de mutex ja travado
 */
-void buffer_clean(MessageBuffer *buf) {
-    if(!(buf) || !(buf->head)) return;
+void buffer_clean(MessageBuffer *buffer) {
+    if(!(buffer) || !(buf->head)) return;
 
-    while(buf->head->remaining_reads <= 0 && buf->head->next && buf->head->next->remaining_reads <= 0) {
-        Message *tmp = buf->head;
-        buf->head = tmp->next;
+    while(buffer->head->remaining_reads <= 0 && buffer->head->next && buffer->head->next->remaining_reads <= 0) {
+        Message *tmp = buffer->head;
+        buffer->head = tmp->next;
         free(tmp);
     }
+}
+
+/*
+    Atualiza o total_readers no buffer para que seja possivel aumentar ou decrementar o numero de leitores de cada mensagem, respeitando o mutex
+*/
+void buffer_update_readers(MessageBuffer *buffer, int dif) {
+    if(!buffer) return;
+
+    pthread_mutex_lock(&(buffer->mutex));
+    buffer->total_readers += dif;
+    pthread_mutex_unlock(&(buffer->mutex));
+}
+
+/*
+    Retorna o final da fila para que um novo leitor possa começar apenas das mensagens novas, respeitando o mutex
+*/
+Message* buffer_get_tail(MessageBuffer *buffer) {
+    if(!buffer) return NULL;
+    
+    pthread_mutex_lock(&(buffer->mutex));
+    Message *tail = buffer->tail;
+    pthread_mutex_unlock(&(buffer->mutex));
+
+    return tail;
 }
 
 // TODO: rotina para analisar possivel valores persistentes em remaining_reads
