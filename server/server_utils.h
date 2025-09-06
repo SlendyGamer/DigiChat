@@ -2,7 +2,22 @@
 #define SERVER_UTILS_H_INCLUDED
 
 #include "common.h"
+#include <pthread.h>
 
-struct ClientSocket *AnalisarConexao(int serverSFD);
+#define MAX_CLIENT_NAME 20
+
+typedef struct ClientInfo {
+    pthread_t receiver_thread;
+    pthread_t sender_thread;
+    int clientSFD;
+    char name[MAX_CLIENT_NAME];
+    int *exit_flag;
+    pthread_mutex_t mutex;
+} ClientInfo;
+
+extern ClientInfo* client;
+
+void warn_client(int clientSFD, const char *msg);
+void parse_command(const char *comm);
 
 #endif //SERVER_UTILS_H_INCLUDED

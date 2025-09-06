@@ -1,4 +1,5 @@
 #include "common.h"
+#include <sys/ioctl.h>
 
 int CriarSocketTCP_IPV4()
 {
@@ -22,4 +23,13 @@ struct sockaddr_in* CriarEndereco_IPV4(char *ip, int porta)
     }
     
     return addr; 
+}
+
+int socket_has_data_to_read(int sockFD) {
+    int count;
+    if (ioctl(sockFD, FIONREAD, &count) < 0) {
+        perror("[ERR] Erro ao verificar existencia de dados na fila de recepcao do socket");
+        return -1;
+    }
+    return count > 0;
 }
