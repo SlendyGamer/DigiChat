@@ -6,7 +6,7 @@
 #include <errno.h>
 
 #define MAX_INPUT MAX_MSG_LEN
-
+#define MAX_CLIENT_NAME 20
 
 static int sockfd = -1;
 static atomic_bool rodando = 1;
@@ -19,7 +19,7 @@ static void encerrar(int sig) {
     if (sockfd != -1) shutdown(sockfd, SHUT_RDWR);
 }
 
-// envia garantindo que todos os bytes foram
+// envia mensagem, garantindo que todos os bytes foram enviados
 static int send_all(int fd, const void *buf, size_t len) {
     const char *p = buf;
     size_t left = len;
@@ -36,7 +36,7 @@ static int send_all(int fd, const void *buf, size_t len) {
     return (int)len;
 }
 
-// THREAD 2 – recebe mensagens do servidor e imprime
+// THREAD 2 – recebe mensagens do servidor e imprime as no terminal
 static void* rx_thread(void *arg) {
     (void)arg;
     char buf[MAX_INPUT + 1];
@@ -65,6 +65,7 @@ static void* tx_thread(void *arg) {
     char *linha = NULL;
     size_t cap = 0;
 
+
     while (rodando) {
         printf("\n> ");
         fflush(stdout);
@@ -76,14 +77,14 @@ static void* tx_thread(void *arg) {
         }
 
         if (n > 0 && linha[n-1] != '\n') {
-            // garante que termina com \n
+            // garante que termina qualquer cadeia de caracteres sempre termina com \n
             linha = realloc(linha, n + 2);
             linha[n] = '\n';
             linha[n+1] = '\0';
             n++;
         }
 
-        // aplica limite definido em common.h
+        // aplica limite para caracteres definido em common.h
         if (n >= MAX_MSG_LEN) {
             printf("[CLIENT] %s\n", ERR_MSG_BUF_OVERFLOW_CLT);
             continue; // não envia nada, volta para o prompt
@@ -100,12 +101,63 @@ static void* tx_thread(void *arg) {
             perror("[CLIENT] Erro ao enviar");
             break;
         }
-
     }
 
     free(linha);
     rodando = 0;
     return NULL;
+}
+
+static bool capturar_nome() {
+    char *linha = NULL;
+    size_t cap = 0;
+    char nome[MAX_CLIENT_NAME];
+    
+    fflush(stdout);
+    
+    // Lê nome uma única vez
+    ssize_t n = getline(&linha, &cap, stdin);
+    if (n < 0) {
+        printf("[CLIENT] Erro na leitura do nome.\n");
+        free(linha);
+        return false;
+    }
+    
+    if (n > 0 && linha[n-1] == '\n') {
+        linha[n-1] = '\0';  // Remove \n
+        n--;
+    }
+    
+    // Valida nome
+    if (n == 0 || strlen(linha) == 0) {
+        printf("[CLIENT] Nome inválido. Conexão cancelada.\n");
+        free(linha);
+        return false;
+    }
+    
+    if (n >= MAX_CLIENT_NAME) {
+        printf("[CLIENT] Nome muito longo. Máximo %d caracteres.\n", MAX_CLIENT_NAME - 1);
+        free(linha);
+        return false;
+    }
+    
+    // Copia nome válido
+    strncpy(nome, linha, MAX_CLIENT_NAME - 1);
+    nome[MAX_CLIENT_NAME - 1] = '\0';
+    
+    // Envia para servidor: :nome <nome>
+    char nome_comando[MAX_CLIENT_NAME + 10];
+    snprintf(nome_comando, sizeof(nome_comando), ":nome %s\n", nome);
+    
+    if (send_all(sockfd, nome_comando, strlen(nome_comando)) < 0) {
+        perror("[CLIENT] Erro ao enviar nome");
+        free(linha);
+        return false;
+    }
+    
+    printf("[CLIENT] Nome '%s' enviado ao servidor.\n", nome);
+    free(linha);
+    return true;
 }
 
 int main(int argc, char **argv) {
@@ -142,12 +194,25 @@ int main(int argc, char **argv) {
 
     printf("[CLIENT] Conectado ao servidor. Aguarde a mensagem inicial...\n");
 
+    usleep(200000); // 200ms - tempo para server inicializar threads
     // cria threads
     if (pthread_create(&th_rx, NULL, rx_thread, NULL) != 0) {
         perror("[CLIENT] Erro ao criar thread RX");
         close(sockfd);
         return 1;
     }
+
+    printf("Aguardando mensagem do servidor...\n");
+    /*
+    if (!capturar_nome()) {
+        // Falha na captura do nome
+        rodando = 0;
+        pthread_join(th_rx, NULL);
+        close(sockfd);
+        printf("[CLIENT] Falha na autenticação. Conexão encerrada.\n");
+        return 1;
+    }
+    */
     if (pthread_create(&th_tx, NULL, tx_thread, NULL) != 0) {
         perror("[CLIENT] Erro ao criar thread TX");
         rodando = 0;
