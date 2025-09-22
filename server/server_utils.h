@@ -19,7 +19,5 @@ extern ClientInfo* client;
 
 void change_client_name(const char *new_name, ClientInfo* info);
 void warn_client(int clientSFD, const char *msg);
-void parse_command(const char *comm, ClientInfo* info);
-void disconnect_client(ClientInfo* info);
 
 #endif //SERVER_UTILS_H_INCLUDED

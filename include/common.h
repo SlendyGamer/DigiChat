@@ -12,6 +12,7 @@
 #include <stdlib.h>
 
 #define MAX_MSG_LEN 1024
+#define MAX_ACTIVE_CLIENTS 5
 
 #define ERR_MSG_CREATE_SOCKET "Erro ao criar o socket"
 #define ERR_MSG_ADDRESS_ASSOCIATION "Erro ao associar socket e ipv4"
@@ -36,5 +37,7 @@ struct sockaddr_in* CriarEndereco_IPV4(char *ip, int port);
 int CriarSocketTCP_IPV4();
 
 int socket_has_data_to_read(int sockFD);
+
+ssize_t secure_send(int sockfd, const void *buf, size_t len);
 
 #endif //COMMON_H_INCLUDED

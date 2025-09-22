@@ -16,7 +16,9 @@ int get_client_count();
 void shutdown_server();
 void* receiver_thread();
 void* sender_thread(void* arg);
-void* timer_thread(void* arg);
+void* timer_thread();
+void disconnect_client(int clientSFD);
+void parse_command(const char *comm, ClientInfo* info);
 
 extern MessageBuffer* buf;
 //extern ClientInfo* client;
@@ -30,18 +32,50 @@ ClientNode* client_list_head = NULL;
 pthread_mutex_t client_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 int server_shutdown_flag = 0;
 pthread_mutex_t shutdown_mutex = PTHREAD_MUTEX_INITIALIZER;
+int serverSFD;
 
 int main()
 {
     // cria socket do servidor
-    int serverSFD = CriarSocketTCP_IPV4();
+    serverSFD = CriarSocketTCP_IPV4();
     if(serverSFD < 0) {
-        perror("[ERR] " ERR_MSG_CREATE_SOCKET);
-        exit(1);
+        fprintf(stderr, "[ERR] Erro ao criar socket para o servidor - ");
+        switch(errno) {
+            case EACCES:
+            case EPERM:
+                fprintf(stderr, "\t\tPermissao negada: voce não pode criar esse tipo de socket.\n");
+                break;
+            case EMFILE:
+                fprintf(stderr, "\t\tLimite de descritores atingido para este processo.\n");
+                break;
+            case ENFILE:
+                fprintf(stderr, "\t\tLimite global de descritores atingido no sistema.\n");
+                break;
+            case EAFNOSUPPORT:
+                fprintf(stderr, "\t\tFamilia de endereços nao suportada.\n");
+                break;
+            case EPROTONOSUPPORT:
+                fprintf(stderr, "\t\tProtocolo não suportado para este tipo de socket.\n");
+                break;
+            case ENOBUFS:
+            case ENOMEM:
+                fprintf(stderr, "\t\tMemoria insuficiente para criar o socket.\n");
+                break;
+            case EINVAL:
+                fprintf(stderr, "\t\tArgumentos invalidos para socket().\n");
+                break;
+            default:
+                fprintf(stderr, "\t\tErro desconhecido ao criar socket: %s\n", strerror(errno));
+        }
+        exit(EXIT_FAILURE);
     }
 
     // cria endereço do servidor, passando ip vazio para tratar como INNADDR_ANY (aceita conexoes de qualquer interface)
     struct sockaddr_in *serverAddr = CriarEndereco_IPV4("", 2000);
+    if (serverAddr == NULL) {
+        fprintf(stderr, "[ERR] Falha ao alocar bytes de memoria para o endereco do servidor.\n");
+        exit(EXIT_FAILURE);
+    }
 
     // associa socket ao endereco
     int resposta = bind(serverSFD, (struct sockaddr*) serverAddr, sizeof(*serverAddr));
@@ -51,8 +85,25 @@ int main()
     }
     else
     {
-        perror("[ERR] " ERR_MSG_ADDRESS_ASSOCIATION);
-        exit(2);
+        fprintf(stderr, "[ERR] Erro ao associar socket ao endereco do servidor - ");
+        switch(errno) {
+            case EACCES:
+                fprintf(stderr, "\t\tPermissao negada para usar a porta.\n");
+                break;
+            case EADDRINUSE:
+                fprintf(stderr, "\t\tPorta ja esta em uso.\n");
+                break;
+            case EADDRNOTAVAIL:
+                fprintf(stderr, "\t\tEndereço IP nao disponivel na maquina.\n");
+                break;
+            case EBADF:
+            case ENOTSOCK:
+                fprintf(stderr, "\t\tSocket invalido.\n");
+                break;
+            default:
+                fprintf(stderr, "\t\tErro desconhecido ao fazer bind: %s\n", strerror(errno));
+        }
+        exit(EXIT_FAILURE);
     }
     // libera struct de endereço ja utilizada
     if(serverAddr) free(serverAddr);
@@ -60,19 +111,41 @@ int main()
     // inicia buffer de mensagens (fila de mensagens compartilhada na memória)
     buf = buffer_init(0);
     if (!buf) {
-        perror("[ERR] Falha ao inicializar buffer"); // TODO: criar ERR_MSG
-        exit(3);
+        fprintf(stderr, "[ERR] Falha ao alocar bytes de memoria para o buffer de mensagens.\n");
+        exit(EXIT_FAILURE);
     }
     
     // colocar server em modo de escuta por novas conexoes
-    if (listen(serverSFD, 1) < 0) {
-        //perror("[ERR] " ERR_MSG_LISTEN);
-        exit(4);
-    } //aceita 5 conexões
+    if (listen(serverSFD, 5) < 0) {
+        fprintf(stderr, "[ERR] Erro ao colocar servidor em modo de escuta por novas conexoes - ");
+        switch(errno) {
+            case EBADF:
+            case ENOTSOCK:
+                fprintf(stderr, "\t\tSocket invalido.\n");
+                break;
+            case EOPNOTSUPP:
+                fprintf(stderr, "\t\tEste tipo de socket nao suporta listen.\n");
+                break;
+            case EADDRINUSE:
+                fprintf(stderr, "\t\tEndereco ou porta ja em uso.\n");
+                break;
+            case EINVAL:
+                fprintf(stderr, "\t\tSocket nao esta associado a um endereco (bind nao chamado?)\n");
+                break;
+            case ENOMEM:
+                fprintf(stderr, "\t\tMemoria insuficiente para a fila de conexoes.\n");
+                break;
+            default:
+                fprintf(stderr, "\t\tErro desconhecido ao chamar listen: %s\n", strerror(errno));
+        }
+        exit(EXIT_FAILURE);
+    } // mantem ate 5 conexoes na fila de espera
+
     // TODO: INCORPORAR CRIAÇÃO DOS DADOS DO CLIENT E ACCEPT EM UMA THREAD INDEPENDENTE, O QUE PERMITIRA MULTIPLOS USUARIOS
+    
     // inicia thread de timer para orquestrar mensagens de data e hora
     pthread_t tid_timer;
-    pthread_create(&tid_timer, NULL, timer_thread, &serverSFD);
+    pthread_create(&tid_timer, NULL, timer_thread, NULL);
     pthread_detach(tid_timer);
     
     struct sockaddr_in clientAddr;
@@ -91,8 +164,48 @@ int main()
         int clientSFD = accept(serverSFD, (struct sockaddr*)&clientAddr, &clientAddrSize);
         if (clientSFD < 0)
         {
-            perror("[ERR] " ERR_MSG_ACCEPT_CONN);
-            exit(3);
+            fprintf(stderr, "[ERR] Erro ao aceitar conexao - ");
+            switch(errno) {
+                case EAGAIN:
+                    fprintf(stderr, "\t\tNao ha conexoes pendentes (socket non-blocking)\n");
+                    break;
+                case EBADF:
+                case ENOTSOCK:
+                    fprintf(stderr, "\t\tSocket invalido.\n");
+                    break;
+                case EOPNOTSUPP:
+                    fprintf(stderr, "\t\tSocket nao suporta accept.\n");
+                    break;
+                case EINTR:
+                    fprintf(stderr, "\t\tAccept interrompido por sinal, tente novamente.\n");
+                    break;
+                case EMFILE:
+                    fprintf(stderr, "\t\tLimite de descritores do processo atingido.\n");
+                    break;
+                case ENFILE:
+                    fprintf(stderr, "\t\tLimite de descritores do sistema atingido.\n");
+                    break;
+                case ECONNABORTED:
+                    fprintf(stderr, "\t\tConexao do cliente abortada.\n");
+                    break;
+                case ENOMEM:
+                    fprintf(stderr, "\t\tMemoria insuficiente para aceitar conexao.\n");
+                    break;
+                default:
+                    fprintf(stderr, "\t\tErro desconhecido em accept: %s\n", strerror(errno));
+            }
+            exit(EXIT_FAILURE);
+        }
+
+        if(get_client_count() > MAX_ACTIVE_CLIENTS) {
+            ssize_t bytes_sent = secure_send(clientSFD, "O limite de usuarios foi atingido! Tente novamente mais tarde.\n", 70);
+            if (bytes_sent < 0) {
+                close(clientSFD);
+                exit(EXIT_FAILURE);
+            }
+
+            close(clientSFD);
+            continue;
         }
         //int current = get_client_count();
         //if (current >= MAX_ACTIVE_CLIENTS) {
@@ -104,28 +217,41 @@ int main()
         //}
         
         printf("[LOG] Nova conexão aceita: FD=%d\n", clientSFD);
-        // Após aceitar conexão, antes de criar threads:
-        ssize_t bytes_sent = send(clientSFD, "Bem-vindo ao DigiChat!\nDigite :nome <seunome> para se identificar.\n", 60, 0);
+
+        time_t currentTime;
+        struct tm *tzTime;
+        char welcome_msg[100];
+        currentTime = time(NULL);
+        tzTime = localtime(&currentTime);
+                
+        snprintf(
+            welcome_msg,
+            sizeof(welcome_msg),
+            "<%02d:%02d:%02d> CONECTADO!\nBem-vindo ao DigiChat!\nDigite :nome <seunome> para se identificar.\n",
+            tzTime->tm_hour,
+            tzTime->tm_min,
+            tzTime->tm_sec
+        );
+        ssize_t bytes_sent = secure_send(clientSFD, welcome_msg, sizeof(welcome_msg));
         if (bytes_sent < 0) {
-            perror("[ERR] Falha ao enviar boas-vindas");
             close(clientSFD);
-            continue;
+            exit(EXIT_FAILURE);
         }
         // inicia a struct de dados do cliente
         ClientInfo* client = (ClientInfo *)malloc(sizeof(ClientInfo));
         if (!client) {
-            perror("[ERR] Falha ao alocar ClientInfo");
+            fprintf(stderr, "[ERR] Falha ao alocar bytes de memoria para a estrutura do cliente.\n");
             close(clientSFD);
-            continue;
+            exit(EXIT_FAILURE);
         }
 
         client->clientSFD = clientSFD;
         client->exit_flag = (int *)malloc(sizeof(int));
         if (!client->exit_flag) {
-            perror("[ERR] Falha ao alocar exit_flag");
+            fprintf(stderr, "[ERR] Falha ao alocar bytes de memoria para a flag de saida.\n");
             free(client);
             close(clientSFD);
-            continue;
+            exit(EXIT_FAILURE);
         }
         *(client->exit_flag) = 0;
         //TODO: client->name = (char*) malloc(MAX_CLIENT_NAME + 1); (DEFINIR MAX_CLIENT_NAME TAMBEM)
@@ -136,7 +262,19 @@ int main()
             close(clientSFD);
             continue;
         }*/
-        strncpy(client->name, "Anonimo", MAX_CLIENT_NAME - 1);
+
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &clientAddr.sin_addr, ip, sizeof(ip));
+        char ipv4[25];
+        snprintf(
+            ipv4,
+            sizeof(ipv4),
+            "%s:%d",
+            ip,
+            ntohs(clientAddr.sin_port)
+        );
+        
+        strncpy(client->name, ipv4, MAX_CLIENT_NAME - 1);
         client->name[MAX_CLIENT_NAME - 1] = '\0';
         pthread_mutex_init(&client->mutex, NULL);
         client->receiver_thread = 0;
@@ -326,6 +464,50 @@ void shutdown_server() {
     pthread_mutex_destroy(&shutdown_mutex);
 }
 
+void disconnect_client(int clientSFD) {
+    pthread_mutex_lock(&client_list_mutex);
+    ClientNode *current = client_list_head, *prev = NULL;
+    while (current && current->client_info->clientSFD != clientSFD) {
+        prev = current;
+        current = current->next;
+    }
+
+    if(current) {
+        if(prev) {
+            if(current->next)
+                prev->next = current->next;
+        } else {
+            client_list_head = current->next;
+        }
+
+        // usleep(100000);
+        // if(current->client_info->exit_flag) free(current->client_info->exit_flag);
+        // if(current->client_info) free(current->client_info);
+        // if(current) free(current);
+
+        // close(clientSFD);
+
+        buffer_update_readers(buf, -1);
+    }
+
+    pthread_mutex_unlock(&client_list_mutex);
+    printf("[LOG] Cliente desconectado! Total de clientes: %d\n", get_client_count());
+}
+
+void parse_command(const char *comm, ClientInfo* info) {
+    char cmd[10], arg[MAX_CLIENT_NAME];
+
+    int n = sscanf(comm, "%9s %20[^\n]", cmd, arg);
+
+    if(n == 1 && !strcmp(cmd, "exit")) {
+        disconnect_client(info->clientSFD);
+    } else if(n == 2 && !strcmp(cmd, "nome")) {
+        change_client_name(arg, info);
+    } else {
+        warn_client(info->clientSFD, ERR_MSG_UNK_COMM);
+    }
+}
+
 /*
     THREAD RECEPTORA
     recebe mensagens do cliente e as coloca no buffer (fila) para que sejam enviadas pelas threads remetentes
@@ -345,7 +527,10 @@ void* receiver_thread(void* arg) {
         // TODO: espera enquanto nao tem nada na fila de recepcao do kernel
 
         // se a flag foi ativada, encerra a thread
-        if(*(client->exit_flag)) pthread_exit(NULL);
+        if(!client || *(client->exit_flag) == 1) {
+            disconnect_client(client->clientSFD);
+            pthread_exit(NULL);
+        }
         // lê os caracteres que estao na fila de recepcao do kernel ate encontrar '\n' ou estourar o limite do buffer (msg)
         for(i = 0; i < 1024; i++) {
             n = recv(client->clientSFD, &(msg[i]), 1, 0);
@@ -358,12 +543,12 @@ void* receiver_thread(void* arg) {
                 }
 
                 *client->exit_flag = 1;
-                pthread_exit(NULL);
+                break;
             } else if(n == 0) {
                 printf("[LOG] " LOG_MSG_DC_SV "\n");
                 
                 *client->exit_flag = 1;
-                pthread_exit(NULL);
+                break;
             }
             
             if(msg[i] == '\n') {
@@ -421,6 +606,7 @@ void* receiver_thread(void* arg) {
     }
 
     *client->exit_flag = 1;   
+    disconnect_client(client->clientSFD);
     pthread_exit(NULL);
 }
 
@@ -431,7 +617,6 @@ void* receiver_thread(void* arg) {
     acompanha a fila de mensagens com seu proprio cursor
 */
 void* sender_thread(void* arg) {
-    int *serverSFD = (int *)arg;
     ClientInfo* client = (ClientInfo*) arg;
     char formatted_msg[MAX_CLIENT_NAME + MAX_MSG_LEN + 32];
     Message *msg;
@@ -440,7 +625,10 @@ void* sender_thread(void* arg) {
 
     // TODO: formata a mensagem para enviar
     while(1) {
-        if(*client->exit_flag) pthread_exit(NULL);
+        if(!client || *client->exit_flag == 1) {
+            disconnect_client(client->clientSFD);
+            pthread_exit(NULL);
+        }
         msg = buffer_read_next(buf, cursor);
         if(msg->senderSFD == client->clientSFD) {
             // MENSAGEM PRÓPRIA - [Você]
@@ -451,7 +639,7 @@ void* sender_thread(void* arg) {
                 msg->time,
                 msg->content
             );
-        } else if(msg->senderSFD != *serverSFD) {
+        } else if(msg->senderSFD != serverSFD) {
             snprintf(
                 formatted_msg,
                 sizeof(formatted_msg),
@@ -470,18 +658,19 @@ void* sender_thread(void* arg) {
         }
 
         if(send(client->clientSFD, formatted_msg, strlen(formatted_msg), 0) < 0) {
-            perror("[ERR] " ERR_MSG_SEND);
+            if(*client->exit_flag == 0)
+                perror("[ERR] " ERR_MSG_SEND);
             break;
         }
     }
 
     free(cursor);
     *client->exit_flag = 1;
+    disconnect_client(client->clientSFD);
     pthread_exit(NULL);
 }
 
-void* timer_thread(void* arg) {
-    int *serverSFD = (int *)arg;
+void* timer_thread() {
     time_t currentTime;
     struct tm *tzTime;
     char timeMsg[58];
@@ -506,7 +695,7 @@ void* timer_thread(void* arg) {
         );
 
         printf("[LOG] Time Message - %s\n", timeMsg);
-        buffer_enqueue(buf, *serverSFD, "", "", timeMsg);
+        buffer_enqueue(buf, serverSFD, "", "", timeMsg);
 
         if(tzTime->tm_sec < 60) sleep(60 - tzTime->tm_sec);
     }
