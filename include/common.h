@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <stdlib.h>
 
+#define MAX_MSG_LEN 1024
+
 #define ERR_MSG_CREATE_SOCKET "Erro ao criar o socket"
 #define ERR_MSG_ADDRESS_ASSOCIATION "Erro ao associar socket e ipv4"
 #define ERR_MSG_ACCEPT_CONN "Erro ao aceitar conexao"

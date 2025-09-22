@@ -1,49 +1,232 @@
+// gcc -Wall -Wextra -O2 -pthread client.c ../lib/utils.c -o client
 #include "common.h"
+#include <pthread.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <errno.h>
 
-/*
-    CLIENTE
-    Thread 1: espera por entrada do teclado e envia mensagens ao servidor
-    Thread 2: espera por mensagens do servidor e exibe na tela
-*/
+#define MAX_INPUT MAX_MSG_LEN
+#define MAX_CLIENT_NAME 20
 
-int main()
-{
-    int SFD = CriarSocketTCP_IPV4(); //Cria um Socket File descriptor com dominio ipv4, tipo TCP e protocolo 0
-    
-    
-    struct sockaddr_in *addr = CriarEndereco_IPV4("127.0.0.1", 2000); //cria uma estrutura de endereco de rede usando dominio IPV4
-    int resposta = connect(SFD, (struct sockaddr*) addr, sizeof (*addr)); //tenta estabelecer conexao com servidor explicitado em addr
+static int sockfd = -1;
+static atomic_bool rodando = 1;
+static pthread_t th_rx, th_tx;
 
-    if (resposta == 0)//connect() retorna 0 se conexao for bem sucedida e -1 se falhou
-    {
-        printf("sucesso ao conectar!");
-    }
-    else
-    {
-        printf("fail");
-        exit(2);
-    }
-    
-    char *linhaDeInput = NULL;
-    size_t linhaDeInputTam = 0; //serao utilizados por getline para capturar o que usuario do client digitar
-    printf("Voce esta conectado, tente digitar algo!\n\n");
-
-    while (true)
-    {
-        ssize_t CaracteresTam = getline(&linhaDeInput, &linhaDeInputTam, stdin); //captura caracteres digitados até CR, incluindo ele
-        if(CaracteresTam>0)
-        {
-            if (strcmp(linhaDeInput, ":exit\n") == 0) //se digitado "/exit" e, em seguida Enter, encerra conexao
-            {
-                break;
-            }
-            ssize_t CaracteresEnviados = send(SFD, linhaDeInput, CaracteresTam, 0); //caso input seja diferente de exit, envia esse input ao server
-        }
-    }
-    close(SFD); //fecha o socket que esta aberto e encerra a conexao com o servidor
+// encerra o cliente (Ctrl+C ou :exit)
+static void encerrar(int sig) {
+    (void)sig;
+    rodando = 0;
+    if (sockfd != -1) shutdown(sockfd, SHUT_RDWR);
 }
 
-// TODO: limitar caracteres de acordo com constante comum (em common.h)
-// TODO: nao printar a mensagem no terminal quando escreve, mas apenas quando receber de volta do servidor
-// IMPORTANTE: deve enviar o /n para interpretacao pela thread receptora no servidor
-// IMPORTANTE: comandos devem ser tratados no servidor, mas podemos criar uma logica de sinais entre cliente e servidor. Exemplo: cliente le ':exit' e envia ':1' (dicionario para funcao em common.h)
+// envia mensagem, garantindo que todos os bytes foram enviados
+static int send_all(int fd, const void *buf, size_t len) {
+    const char *p = buf;
+    size_t left = len;
+    while (left) {
+        ssize_t n = send(fd, p, left, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return 0;
+        p += n;
+        left -= (size_t)n;
+    }
+    return (int)len;
+}
+
+// THREAD 2 – recebe mensagens do servidor e imprime as no terminal
+static void* rx_thread(void *arg) {
+    (void)arg;
+    char buf[MAX_INPUT + 1];
+    while (rodando) {
+        ssize_t n = recv(sockfd, buf, MAX_INPUT, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            perror("[CLIENT] Erro ao receber");
+            break;
+        }
+        if (n == 0) {
+            printf("\n[CLIENT] Servidor encerrou a conexão.\n");
+            break;
+        }
+        buf[n] = '\0';
+        fputs(buf, stdout);
+        fflush(stdout);
+    }
+    rodando = 0;
+    return NULL;
+}
+
+// THREAD 1 – lê do teclado e envia ao servidor
+static void* tx_thread(void *arg) {
+    (void)arg;
+    char *linha = NULL;
+    size_t cap = 0;
+
+
+    while (rodando) {
+        printf("\n> ");
+        fflush(stdout);
+
+        ssize_t n = getline(&linha, &cap, stdin);
+        if (n < 0) {
+            printf("\n[CLIENT] Entrada fechada.\n");
+            break;
+        }
+
+        if (n > 0 && linha[n-1] != '\n') {
+            // garante que termina qualquer cadeia de caracteres sempre termina com \n
+            linha = realloc(linha, n + 2);
+            linha[n] = '\n';
+            linha[n+1] = '\0';
+            n++;
+        }
+
+        // aplica limite para caracteres definido em common.h
+        if (n >= MAX_MSG_LEN) {
+            printf("[CLIENT] %s\n", ERR_MSG_BUF_OVERFLOW_CLT);
+            continue; // não envia nada, volta para o prompt
+        }
+
+        // comando local de saída
+        if (strncmp(linha, ":exit", 5) == 0) {
+            send_all(sockfd, linha, n);
+            break;
+        }
+
+        // envia para o servidor
+        if (send_all(sockfd, linha, n) < 0) {
+            perror("[CLIENT] Erro ao enviar");
+            break;
+        }
+    }
+
+    free(linha);
+    rodando = 0;
+    return NULL;
+}
+
+static bool capturar_nome() {
+    char *linha = NULL;
+    size_t cap = 0;
+    char nome[MAX_CLIENT_NAME];
+    
+    fflush(stdout);
+    
+    // Lê nome uma única vez
+    ssize_t n = getline(&linha, &cap, stdin);
+    if (n < 0) {
+        printf("[CLIENT] Erro na leitura do nome.\n");
+        free(linha);
+        return false;
+    }
+    
+    if (n > 0 && linha[n-1] == '\n') {
+        linha[n-1] = '\0';  // Remove \n
+        n--;
+    }
+    
+    // Valida nome
+    if (n == 0 || strlen(linha) == 0) {
+        printf("[CLIENT] Nome inválido. Conexão cancelada.\n");
+        free(linha);
+        return false;
+    }
+    
+    if (n >= MAX_CLIENT_NAME) {
+        printf("[CLIENT] Nome muito longo. Máximo %d caracteres.\n", MAX_CLIENT_NAME - 1);
+        free(linha);
+        return false;
+    }
+    
+    // Copia nome válido
+    strncpy(nome, linha, MAX_CLIENT_NAME - 1);
+    nome[MAX_CLIENT_NAME - 1] = '\0';
+    
+    // Envia para servidor: :nome <nome>
+    char nome_comando[MAX_CLIENT_NAME + 10];
+    snprintf(nome_comando, sizeof(nome_comando), ":nome %s\n", nome);
+    
+    if (send_all(sockfd, nome_comando, strlen(nome_comando)) < 0) {
+        perror("[CLIENT] Erro ao enviar nome");
+        free(linha);
+        return false;
+    }
+    
+    printf("[CLIENT] Nome '%s' enviado ao servidor.\n", nome);
+    free(linha);
+    return true;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 3) {
+        fprintf(stderr, "Uso: %s <ip> <porta>\n", argv[0]);
+        return 1;
+    }
+
+    const char *ip = argv[1];
+    int porta = atoi(argv[2]);
+
+    // trata Ctrl+C
+    struct sigaction sa;
+    sa.sa_handler = encerrar;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+
+    // cria socket e conecta
+    sockfd = CriarSocketTCP_IPV4();
+    if (sockfd < 0) {
+        perror("[CLIENT] Erro ao criar socket");
+        return 1;
+    }
+
+    struct sockaddr_in *addr = CriarEndereco_IPV4((char*)ip, porta);
+    if (connect(sockfd, (struct sockaddr*)addr, sizeof(*addr)) < 0) {
+        perror("[CLIENT] Erro ao conectar");
+        free(addr);
+        close(sockfd);
+        return 1;
+    }
+    free(addr);
+
+    printf("[CLIENT] Conectado ao servidor. Aguarde a mensagem inicial...\n");
+
+    usleep(200000); // 200ms - tempo para server inicializar threads
+    // cria threads
+    if (pthread_create(&th_rx, NULL, rx_thread, NULL) != 0) {
+        perror("[CLIENT] Erro ao criar thread RX");
+        close(sockfd);
+        return 1;
+    }
+
+    printf("Aguardando mensagem do servidor...\n");
+    /*
+    if (!capturar_nome()) {
+        // Falha na captura do nome
+        rodando = 0;
+        pthread_join(th_rx, NULL);
+        close(sockfd);
+        printf("[CLIENT] Falha na autenticação. Conexão encerrada.\n");
+        return 1;
+    }
+    */
+    if (pthread_create(&th_tx, NULL, tx_thread, NULL) != 0) {
+        perror("[CLIENT] Erro ao criar thread TX");
+        rodando = 0;
+        shutdown(sockfd, SHUT_RDWR);
+        pthread_join(th_rx, NULL);
+        close(sockfd);
+        return 1;
+    }
+
+    // espera ambas terminarem
+    pthread_join(th_tx, NULL);
+    rodando = 0;
+    shutdown(sockfd, SHUT_RDWR);
+    pthread_join(th_rx, NULL);
+    close(sockfd);
+    return 0;
+}
